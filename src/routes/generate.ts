@@ -4,8 +4,9 @@ import { runCapabilitySelectionStage } from '../stages/capability-selection';
 import { runStructuralPromptStage, type StructuralPromptConstraints } from '../stages/structural-prompt';
 import { runNodeSelectionStage, type NodeSelectionConstraints } from '../stages/node-selection';
 import { runEdgeReasoningStage } from '../stages/edge-reasoning';
+import { runValidationLlmStage, type Workflow } from '../stages/validation';
 import type { StructuredIntent } from '../stages/intent';
-import type { SelectedNode } from '../lib/system-prompt-builder';
+import type { ProposedEdge, SelectedNode } from '../lib/system-prompt-builder';
 import { getNodeCatalog } from '../lib/catalog';
 
 const router = Router();
@@ -214,6 +215,66 @@ router.post('/edge-reasoning', async (req: Request, res: Response): Promise<void
   res.json(result);
 });
 
+/**
+ * POST /generate/validation
+ *
+ * Body:
+ *   intent           - StructuredIntent or raw user intent string (required)
+ *   catalog          - pre-built node catalog string from the worker (optional;
+ *                      falls back to fetching /api/nodes/catalog from the worker)
+ *   correlationId    - forwarded for structured log correlation (optional)
+ *   workflow         - assembled workflow graph to validate (required)
+ *   selectedNodes    - node-selection output used by validation prompt context (optional)
+ *   proposedEdges    - edge-reasoning output used by validation prompt context (optional)
+ *   structuralPrompt - workflow blueprint from structural-prompt stage (optional)
+ *
+ * Response: ValidationLlmOutput. The worker keeps structural validation locally.
+ */
+router.post('/validation', async (req: Request, res: Response): Promise<void> => {
+  const { intent, catalog, correlationId, workflow, selectedNodes, proposedEdges, structuralPrompt } = req.body as {
+    intent?: StructuredIntent | string;
+    catalog?: string;
+    correlationId?: string;
+    workflow?: unknown;
+    selectedNodes?: unknown;
+    proposedEdges?: unknown;
+    structuralPrompt?: string;
+  };
+
+  const userIntent = normalizeIntentText(intent);
+  if (!userIntent) {
+    res.status(400).json({ error: 'intent is required', ref: req.requestId });
+    return;
+  }
+
+  const normalizedWorkflow = normalizeWorkflow(workflow);
+  if (!normalizedWorkflow) {
+    res.status(400).json({ error: 'workflow.nodes is required', ref: req.requestId });
+    return;
+  }
+
+  let nodeCatalog: string;
+  try {
+    nodeCatalog = (typeof catalog === 'string' && catalog.length > 0)
+      ? catalog
+      : await getNodeCatalog();
+  } catch (err) {
+    res.status(503).json({ error: 'Node catalog unavailable', detail: String(err), ref: req.requestId });
+    return;
+  }
+
+  const result = await runValidationLlmStage(
+    normalizedWorkflow,
+    nodeCatalog,
+    userIntent,
+    normalizeSelectedNodes(selectedNodes),
+    normalizeProposedEdges(proposedEdges),
+    correlationId,
+    typeof structuralPrompt === 'string' ? structuralPrompt : undefined,
+  );
+  res.json(result);
+});
+
 export default router;
 
 function isStructuredIntent(value: unknown): value is StructuredIntent {
@@ -261,6 +322,35 @@ function normalizeSelectedNodes(value: unknown): SelectedNode[] | undefined {
   }
 
   return nodes.length > 0 ? nodes : undefined;
+}
+
+function normalizeProposedEdges(value: unknown): ProposedEdge[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const edges: ProposedEdge[] = [];
+
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue;
+    const item = raw as Record<string, unknown>;
+    const source = String(item.source || '').trim();
+    const target = String(item.target || '').trim();
+    const type = String(item.type || '').trim();
+    if (!source || !target || !type) continue;
+    edges.push({ source, target, type });
+  }
+
+  return edges.length > 0 ? edges : undefined;
+}
+
+function normalizeWorkflow(value: unknown): Workflow | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const obj = value as Record<string, unknown>;
+  if (!Array.isArray(obj.nodes) || obj.nodes.length === 0) return undefined;
+
+  return {
+    nodes: obj.nodes as Workflow['nodes'],
+    edges: Array.isArray(obj.edges) ? obj.edges as Workflow['edges'] : [],
+    metadata: obj.metadata,
+  };
 }
 
 function normalizeStructuralPromptConstraints(body: Record<string, unknown>): StructuralPromptConstraints | undefined {

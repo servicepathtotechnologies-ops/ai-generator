@@ -78,6 +78,12 @@ export interface ProposedEdge {
   type: 'main' | 'true' | 'false' | string;
 }
 
+export interface ValidationIssue {
+  severity: 'error' | 'warning';
+  description: string;
+  suggestedFix?: string;
+}
+
 export interface NodeSelectionPromptContext {
   selectedNodeConstraintsByStep?: Record<string, string[]>;
   selectedNodeConstraintsFlat?: string[];
@@ -86,6 +92,12 @@ export interface NodeSelectionPromptContext {
 export interface EdgeReasoningPromptContext {
   selectedNodes?: SelectedNode[];
   cycleInfo?: string;
+}
+
+export interface ValidationPromptContext {
+  selectedNodes?: SelectedNode[];
+  edgeList?: ProposedEdge[];
+  validationIssues?: ValidationIssue[];
 }
 
 export const NODE_SELECTION_OUTPUT_SCHEMA = {
@@ -121,6 +133,26 @@ export const EDGE_REASONING_OUTPUT_SCHEMA = {
           source: { type: 'string' },
           target: { type: 'string' },
           type: { type: 'string' },
+        },
+      },
+    },
+  },
+};
+
+export const VALIDATION_OUTPUT_SCHEMA = {
+  type: 'object',
+  required: ['status', 'issues'],
+  properties: {
+    status: { type: 'string', enum: ['pass', 'fail'] },
+    issues: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['severity', 'description'],
+        properties: {
+          severity: { type: 'string', enum: ['error', 'warning'] },
+          description: { type: 'string' },
+          suggestedFix: { type: 'string' },
         },
       },
     },
@@ -421,6 +453,100 @@ export function buildEdgeReasoningPrompt(
     '5. No node appears as a target more than once (except merge nodes).',
     '6. The trigger nodeId is the source of the first edge and never a target.',
     '7. The terminal nodeId is the target of the last edge and never a source.',
+    '',
+    '## USER INTENT',
+    userIntent,
+  ].join('\n');
+
+  return { systemPrompt, outputSchema: EDGE_REASONING_OUTPUT_SCHEMA };
+}
+
+/**
+ * Builds the LLM system prompt for the validation stage.
+ * Mirrors the worker prompt contract: validate structure, semantics, completeness, and data flow.
+ */
+export function buildValidationPrompt(
+  nodeCatalog: string,
+  userIntent: string,
+  ctx?: ValidationPromptContext,
+): IntentPromptResult {
+  const graphText = ctx?.edgeList
+    ? JSON.stringify({ nodes: ctx.selectedNodes, edges: ctx.edgeList }, null, 2)
+    : '(graph not provided)';
+
+  const systemPrompt = [
+    '## ROLE AND OBJECTIVE',
+    'You are a workflow validation engine for a workflow automation platform.',
+    'Your job is to validate the assembled workflow graph on FOUR dimensions:',
+    '1. STRUCTURAL VALIDITY: Is the graph a valid DAG? Are all edges correctly typed? Is every node reachable from the trigger?',
+    '2. SEMANTIC ALIGNMENT: Does the graph actually accomplish what the user asked?',
+    '3. COMPLETENESS: Are there any missing required nodes or missing connections?',
+    '4. DATA FLOW COHERENCE: Are the outputs of upstream nodes compatible with the inputs of downstream nodes?',
+    '',
+    '## NODE CATALOG',
+    nodeCatalog,
+    '',
+    '## WORKFLOW GRAPH TO VALIDATE',
+    graphText,
+    '',
+    '## OUTPUT FORMAT',
+    'You MUST return ONLY valid JSON conforming exactly to this schema:',
+    JSON.stringify(VALIDATION_OUTPUT_SCHEMA, null, 2),
+    '',
+    '## HARD CONSTRAINTS',
+    '- Every "error"-severity issue MUST include a "suggestedFix" field.',
+    '- "warning"-severity issues are informational and do not block the workflow.',
+    '- If the graph is fully valid on all four dimensions, return status: "pass" with an empty issues array.',
+    '- Return ONLY the JSON object. No explanation, no markdown, no extra text.',
+    '',
+    '## USER INTENT',
+    userIntent,
+  ].join('\n');
+
+  return { systemPrompt, outputSchema: VALIDATION_OUTPUT_SCHEMA };
+}
+
+/**
+ * Builds the LLM system prompt for the repair stage.
+ * Mirrors the worker prompt contract: return a corrected graph using the edge-reasoning schema.
+ */
+export function buildRepairPrompt(
+  nodeCatalog: string,
+  userIntent: string,
+  ctx?: ValidationPromptContext,
+): IntentPromptResult {
+  const issuesText = ctx?.validationIssues
+    ? JSON.stringify(ctx.validationIssues, null, 2)
+    : '(no issues provided)';
+
+  const graphText = ctx?.edgeList
+    ? JSON.stringify({ nodes: ctx.selectedNodes, edges: ctx.edgeList }, null, 2)
+    : '(graph not provided)';
+
+  const systemPrompt = [
+    '## ROLE AND OBJECTIVE',
+    'You are a workflow repair engine for a workflow automation platform.',
+    'The workflow graph below has validation errors. Your job is to return a corrected graph.',
+    '',
+    '## NODE CATALOG',
+    nodeCatalog,
+    '',
+    '## CURRENT WORKFLOW GRAPH (WITH ERRORS)',
+    graphText,
+    '',
+    '## VALIDATION ERRORS TO FIX',
+    issuesText,
+    '',
+    '## OUTPUT FORMAT',
+    'Return the corrected workflow graph using the edge reasoning schema:',
+    JSON.stringify(EDGE_REASONING_OUTPUT_SCHEMA, null, 2),
+    '',
+    '## HARD CONSTRAINTS',
+    DAG_CONSTRAINTS,
+    '',
+    '- Fix ALL "error"-severity issues listed above.',
+    '- Preserve the user\'s original intent - do not remove nodes unless they are structurally invalid.',
+    '- Return ONLY the JSON object. No explanation, no markdown, no extra text.',
     '',
     '## USER INTENT',
     userIntent,
