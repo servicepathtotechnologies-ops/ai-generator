@@ -5,6 +5,10 @@ import { runStructuralPromptStage, type StructuralPromptConstraints } from '../s
 import { runNodeSelectionStage, type NodeSelectionConstraints } from '../stages/node-selection';
 import { runEdgeReasoningStage } from '../stages/edge-reasoning';
 import { runValidationLlmStage, type Workflow } from '../stages/validation';
+import {
+  runPropertyPopulationJsonStage,
+  type PropertyPopulationJsonPurpose,
+} from '../stages/property-population';
 import type { StructuredIntent } from '../stages/intent';
 import type { ProposedEdge, SelectedNode } from '../lib/system-prompt-builder';
 import { getNodeCatalog } from '../lib/catalog';
@@ -275,6 +279,57 @@ router.post('/validation', async (req: Request, res: Response): Promise<void> =>
   res.json(result);
 });
 
+/**
+ * POST /generate/property-population
+ *
+ * Body:
+ *   purpose       - property_population or field_directive_generation (optional)
+ *   systemPrompt  - worker-built system prompt (required)
+ *   message       - worker-built user message (required)
+ *   allowedKeys   - field keys to retain from the JSON object (optional)
+ *   correlationId - forwarded for structured log correlation (optional)
+ *   nodeId/nodeType - forwarded for structured log context (optional)
+ *
+ * Response: parsed JSON object from the LLM. The worker keeps registry/default
+ * ownership decisions and all workflow mutation locally.
+ */
+router.post('/property-population', async (req: Request, res: Response): Promise<void> => {
+  const { systemPrompt, message, correlationId, nodeId, nodeType } = req.body as {
+    systemPrompt?: string;
+    message?: string;
+    correlationId?: string;
+    nodeId?: string;
+    nodeType?: string;
+  };
+
+  if (!systemPrompt || typeof systemPrompt !== 'string' || !systemPrompt.trim()) {
+    res.status(400).json({ error: 'systemPrompt is required', ref: req.requestId });
+    return;
+  }
+
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    res.status(400).json({ error: 'message is required', ref: req.requestId });
+    return;
+  }
+
+  const purpose = normalizePropertyPopulationPurpose(req.body?.purpose);
+  if (!purpose) {
+    res.status(400).json({ error: 'purpose must be property_population or field_directive_generation', ref: req.requestId });
+    return;
+  }
+
+  const result = await runPropertyPopulationJsonStage({
+    purpose,
+    systemPrompt: systemPrompt.trim(),
+    message,
+    allowedKeys: normalizeStringArray(req.body?.allowedKeys),
+    correlationId,
+    nodeId: typeof nodeId === 'string' ? nodeId : undefined,
+    nodeType: typeof nodeType === 'string' ? nodeType : undefined,
+  });
+  res.json(result);
+});
+
 export default router;
 
 function isStructuredIntent(value: unknown): value is StructuredIntent {
@@ -351,6 +406,12 @@ function normalizeWorkflow(value: unknown): Workflow | undefined {
     edges: Array.isArray(obj.edges) ? obj.edges as Workflow['edges'] : [],
     metadata: obj.metadata,
   };
+}
+
+function normalizePropertyPopulationPurpose(value: unknown): PropertyPopulationJsonPurpose | undefined {
+  if (value === undefined || value === null || value === '') return 'property_population';
+  if (value === 'property_population' || value === 'field_directive_generation') return value;
+  return undefined;
 }
 
 function normalizeStructuralPromptConstraints(body: Record<string, unknown>): StructuralPromptConstraints | undefined {
