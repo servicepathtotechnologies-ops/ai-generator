@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { runIntentStage } from '../stages/intent';
 import { runCapabilitySelectionJsonStage } from '../stages/capability-selection-json';
 import { runStructuralPromptStage, type StructuralPromptConstraints } from '../stages/structural-prompt';
-import { runNodeSelectionStage, type NodeSelectionConstraints } from '../stages/node-selection';
+import { runNodeSelectionJsonStage } from '../stages/node-selection-json';
 import { runEdgeReasoningStage } from '../stages/edge-reasoning';
 import { runValidationLlmStage, type Workflow } from '../stages/validation';
 import {
@@ -119,49 +119,39 @@ router.post('/structural-prompt', async (req: Request, res: Response): Promise<v
 });
 
 /**
- * POST /generate/node-selection
+ * POST /generate/node-selection-json
  *
  * Body:
- *   intent           - StructuredIntent from the intent stage (required)
- *   catalog          - pre-built node catalog string from the worker (optional;
- *                      falls back to fetching /api/nodes/catalog from the worker)
- *   correlationId    - forwarded for structured log correlation (optional)
- *   structuralPrompt - workflow blueprint from structural-prompt stage (optional)
- *   constraints      - selected/required node constraints (optional)
+ *   systemPrompt  - worker-built node-selection prompt (required)
+ *   message       - worker-built user message (required)
+ *   correlationId - forwarded for structured log correlation (optional)
  *
- * Response: NodeSelectionOutput (same shape as worker's node-selection stage)
+ * Response: parsed selected node JSON from the LLM. The worker keeps registry
+ * reconciliation, trigger injection, required-node repair, node-id assignment,
+ * and all node-selection policy decisions locally.
  */
-router.post('/node-selection', async (req: Request, res: Response): Promise<void> => {
-  const { intent, catalog, correlationId, structuralPrompt } = req.body as {
-    intent?: StructuredIntent;
-    catalog?: string;
+router.post('/node-selection-json', async (req: Request, res: Response): Promise<void> => {
+  const { systemPrompt, message, correlationId } = req.body as {
+    systemPrompt?: string;
+    message?: string;
     correlationId?: string;
-    structuralPrompt?: string;
   };
 
-  if (!isStructuredIntent(intent)) {
-    res.status(400).json({ error: 'intent is required', ref: req.requestId });
+  if (!systemPrompt || typeof systemPrompt !== 'string' || !systemPrompt.trim()) {
+    res.status(400).json({ error: 'systemPrompt is required', ref: req.requestId });
     return;
   }
 
-  let nodeCatalog: string;
-  try {
-    nodeCatalog = (typeof catalog === 'string' && catalog.length > 0)
-      ? catalog
-      : await getNodeCatalog();
-  } catch (err) {
-    res.status(503).json({ error: 'Node catalog unavailable', detail: String(err), ref: req.requestId });
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    res.status(400).json({ error: 'message is required', ref: req.requestId });
     return;
   }
 
-  const constraints = normalizeNodeSelectionConstraints(req.body as Record<string, unknown>);
-  const result = await runNodeSelectionStage(
-    intent,
-    nodeCatalog,
+  const result = await runNodeSelectionJsonStage({
+    systemPrompt: systemPrompt.trim(),
+    message,
     correlationId,
-    typeof structuralPrompt === 'string' ? structuralPrompt : undefined,
-    constraints,
-  );
+  });
   res.json(result);
 });
 
@@ -432,39 +422,6 @@ function normalizeStructuralPromptConstraints(body: Record<string, unknown>): St
   return {
     selectedNodeConstraintsByStep: byStep,
     selectedNodeConstraintsFlat: flat,
-  };
-}
-
-function normalizeNodeSelectionConstraints(body: Record<string, unknown>): NodeSelectionConstraints | undefined {
-  const nested = body.constraints && typeof body.constraints === 'object' && !Array.isArray(body.constraints)
-    ? body.constraints as Record<string, unknown>
-    : {};
-
-  let byStep =
-    normalizeStringArrayRecord(nested.selectedNodeConstraintsByStep) ??
-    normalizeStringArrayRecord(body.selectedNodeConstraintsByStep);
-  let flat =
-    normalizeStringArray(nested.selectedNodeConstraintsFlat) ??
-    normalizeStringArray(body.selectedNodeConstraintsFlat);
-  const required =
-    normalizeStringArray(nested.requiredNodeTypes) ??
-    normalizeStringArray(body.requiredNodeTypes);
-
-  if ((!byStep || !flat) && body.selectedCapabilities !== undefined) {
-    const selected = normalizeSelectedCapabilities(body.selectedCapabilities);
-    byStep = byStep ?? selected.selectedNodeConstraintsByStep;
-    flat = flat ?? selected.selectedNodeConstraintsFlat;
-  }
-
-  if (!flat && byStep) {
-    flat = [...new Set(Object.values(byStep).flat())];
-  }
-
-  if (!byStep && !flat && !required) return undefined;
-  return {
-    selectedNodeConstraintsByStep: byStep,
-    selectedNodeConstraintsFlat: flat,
-    requiredNodeTypes: required,
   };
 }
 

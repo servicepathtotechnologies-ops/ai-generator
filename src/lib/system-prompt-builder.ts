@@ -84,11 +84,6 @@ export interface ValidationIssue {
   suggestedFix?: string;
 }
 
-export interface NodeSelectionPromptContext {
-  selectedNodeConstraintsByStep?: Record<string, string[]>;
-  selectedNodeConstraintsFlat?: string[];
-}
-
 export interface EdgeReasoningPromptContext {
   selectedNodes?: SelectedNode[];
   cycleInfo?: string;
@@ -99,25 +94,6 @@ export interface ValidationPromptContext {
   edgeList?: ProposedEdge[];
   validationIssues?: ValidationIssue[];
 }
-
-export const NODE_SELECTION_OUTPUT_SCHEMA = {
-  type: 'object',
-  required: ['selectedNodes'],
-  properties: {
-    selectedNodes: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['type', 'role', 'reason'],
-        properties: {
-          type: { type: 'string' },
-          role: { type: 'string', enum: ['trigger', 'action', 'logic', 'terminal'] },
-          reason: { type: 'string' },
-        },
-      },
-    },
-  },
-};
 
 export const EDGE_REASONING_OUTPUT_SCHEMA = {
   type: 'object',
@@ -297,80 +273,6 @@ export function buildCapabilitySelectionPrompt(nodeCatalog: string, userIntent: 
   ].join('\n');
 
   return { systemPrompt, outputSchema: CAPABILITY_SELECTION_OUTPUT_SCHEMA };
-}
-
-/**
- * Builds the LLM system prompt for the node-selection stage.
- * Mirrors the worker prompt contract: select a minimal registry-backed node set.
- */
-export function buildNodeSelectionPrompt(
-  nodeCatalog: string,
-  userIntent: string,
-  ctx?: NodeSelectionPromptContext,
-): IntentPromptResult {
-  const allowedByStepText = ctx?.selectedNodeConstraintsByStep
-    ? JSON.stringify(ctx.selectedNodeConstraintsByStep, null, 2)
-    : '(none)';
-  const allowedFlatText = ctx?.selectedNodeConstraintsFlat?.length
-    ? JSON.stringify(ctx.selectedNodeConstraintsFlat, null, 2)
-    : '(none)';
-
-  const systemPrompt = [
-    '## ROLE AND OBJECTIVE',
-    'You are a node selection engine for a workflow automation platform.',
-    'Your job is to select the minimal set of node types needed to fulfill the user intent.',
-    'You MUST select nodes ONLY from the NODE CATALOG below. Do not invent node types.',
-    '',
-    '## NODE CATALOG',
-    nodeCatalog,
-    '',
-    '## USER-CONFIRMED NODE CONSTRAINTS',
-    'The user may have explicitly selected node candidates in a prior capability step.',
-    `Allowed by step: ${allowedByStepText}`,
-    `Allowed flat list: ${allowedFlatText}`,
-    'If constraints are provided, selectedNodes MUST only use those node types.',
-    'If allowed flat list is not empty, every selected node type MUST belong to that list.',
-    '',
-    '## OUTPUT FORMAT',
-    'You MUST return ONLY valid JSON conforming exactly to this schema:',
-    JSON.stringify(NODE_SELECTION_OUTPUT_SCHEMA, null, 2),
-    '',
-    '## HARD CONSTRAINTS - TRIGGER AND MINIMAL SET',
-    '- You MUST include exactly ONE trigger node where isTrigger is true in the catalog.',
-    '- Select the MINIMAL necessary set of nodes. Do not add nodes not implied by the user intent.',
-    '- Every selected node type MUST exist in the NODE CATALOG above.',
-    '- Assign role "trigger" for the trigger, "logic" for conditional or routing nodes,',
-    '  "terminal" for final output nodes, and "action" for all other work nodes.',
-    '- Return ONLY the JSON object. No markdown, no explanation, no extra text.',
-    '',
-    '## CRITICAL RULE - ONLY WHAT THE USER ASKED FOR',
-    'Select ONLY nodes that directly implement what the user described.',
-    'Never add helper, logging, monitoring, retry, transform, parser, formatter, or utility nodes unless',
-    'the user explicitly asked for that operation by name.',
-    'Data flowing between nodes is automatic and does not require a transformation node.',
-    '',
-    '## CRITICAL RULE - PRESERVE EXPLICIT SERVICE NAMES',
-    'When the user names a service such as Gmail, Slack, Sheets, Drive, Salesforce, or Zoom,',
-    'select that service-specific node from the live catalog instead of a generic substitute.',
-    '',
-    '## CRITICAL RULE - BRANCH NODE UNIQUENESS',
-    'When the workflow contains a switch or if-else node, every branch must have its own',
-    'independent downstream node instance. If multiple branches need the same node type,',
-    'emit multiple selectedNodes entries of that type, one per branch.',
-    'Do not share one terminal/output node across exclusive branches.',
-    '',
-    '## CONTROL FLOW NODE SELECTION GUIDE',
-    'Use if_else for binary conditions: if, when, approve/reject, pass/fail, yes/no, true/false,',
-    'or comparisons such as >, <, <=, >=, ==, !=.',
-    'Use switch for 3 or more cases from a single field: status, category, priority, state, route by,',
-    'depending on, switch on, case, or multiple named outcomes.',
-    'Use loop only when the user asks to iterate, for each item, repeat, batch process, or process all items.',
-    '',
-    '## USER INTENT',
-    userIntent,
-  ].join('\n');
-
-  return { systemPrompt, outputSchema: NODE_SELECTION_OUTPUT_SCHEMA };
 }
 
 /**
