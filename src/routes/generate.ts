@@ -4,6 +4,7 @@ import { runCapabilitySelectionJsonStage } from '../stages/capability-selection-
 import { runStructuralPromptStage, type StructuralPromptConstraints } from '../stages/structural-prompt';
 import { runNodeSelectionJsonStage } from '../stages/node-selection-json';
 import { runEdgeReasoningJsonStage } from '../stages/edge-reasoning-json';
+import { runEdgeReasoningStage } from '../stages/edge-reasoning';
 import { runValidationLlmStage, type Workflow } from '../stages/validation';
 import {
   runPropertyPopulationJsonStage,
@@ -189,6 +190,51 @@ router.post('/edge-reasoning-json', async (req: Request, res: Response): Promise
     message,
     correlationId,
   });
+  res.json(result);
+});
+
+/**
+ * POST /generate/edge-reasoning
+ *
+ * Body:
+ *   selectedNodes    - SelectedNode[] from node-selection stage (required)
+ *   catalog          - pre-built node catalog string from the worker (optional)
+ *   userIntent       - plain-text user intent (required)
+ *   correlationId    - forwarded for structured log correlation (optional)
+ *   structuralPrompt - workflow blueprint from structural-prompt stage (optional)
+ *
+ * Response: EdgeReasoningOutput (full stage result including workflow, orderedNodeIds, edges).
+ * The worker may re-materialize using its own registry rather than using the returned workflow
+ * directly.
+ */
+router.post('/edge-reasoning', async (req: Request, res: Response): Promise<void> => {
+  const { selectedNodes, catalog, userIntent, correlationId, structuralPrompt } = req.body as {
+    selectedNodes?: unknown;
+    catalog?: string;
+    userIntent?: string;
+    correlationId?: string;
+    structuralPrompt?: string;
+  };
+
+  const normalizedNodes = normalizeSelectedNodes(selectedNodes);
+  if (!normalizedNodes || normalizedNodes.length === 0) {
+    res.status(400).json({ error: 'selectedNodes is required', ref: req.requestId });
+    return;
+  }
+
+  if (!userIntent || typeof userIntent !== 'string' || !userIntent.trim()) {
+    res.status(400).json({ error: 'userIntent is required', ref: req.requestId });
+    return;
+  }
+
+  const nodeCatalog = typeof catalog === 'string' ? catalog : '';
+  const result = await runEdgeReasoningStage(
+    normalizedNodes,
+    nodeCatalog,
+    userIntent.trim(),
+    correlationId,
+    typeof structuralPrompt === 'string' ? structuralPrompt : undefined,
+  );
   res.json(result);
 });
 
