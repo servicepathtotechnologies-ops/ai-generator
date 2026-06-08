@@ -3,7 +3,7 @@ import { runIntentStage } from '../stages/intent';
 import { runCapabilitySelectionJsonStage } from '../stages/capability-selection-json';
 import { runStructuralPromptStage, type StructuralPromptConstraints } from '../stages/structural-prompt';
 import { runNodeSelectionJsonStage } from '../stages/node-selection-json';
-import { runEdgeReasoningStage } from '../stages/edge-reasoning';
+import { runEdgeReasoningJsonStage } from '../stages/edge-reasoning-json';
 import { runValidationLlmStage, type Workflow } from '../stages/validation';
 import {
   runPropertyPopulationJsonStage,
@@ -156,56 +156,39 @@ router.post('/node-selection-json', async (req: Request, res: Response): Promise
 });
 
 /**
- * POST /generate/edge-reasoning
+ * POST /generate/edge-reasoning-json
  *
  * Body:
- *   intent           - StructuredIntent or raw user intent string (required)
- *   catalog          - pre-built node catalog string from the worker (optional;
- *                      falls back to fetching /api/nodes/catalog from the worker)
- *   correlationId    - forwarded for structured log correlation (optional)
- *   selectedNodes    - node-selection output to order and connect (required)
- *   structuralPrompt - workflow blueprint from structural-prompt stage (optional)
+ *   systemPrompt  - worker-built edge-reasoning prompt (required)
+ *   message       - worker-built user message (required)
+ *   correlationId - forwarded for structured log correlation (optional)
  *
- * Response: EdgeReasoningOutput (same shape as worker's edge-reasoning stage)
+ * Response: parsed orderedNodes + edges from the LLM (after cycle-detection retry).
+ * The worker keeps: WorkflowNode building (real registry), seeded edge construction,
+ * graph orchestrator initialization, switch-case extraction, and branch coverage logic.
  */
-router.post('/edge-reasoning', async (req: Request, res: Response): Promise<void> => {
-  const { intent, catalog, correlationId, selectedNodes, structuralPrompt } = req.body as {
-    intent?: StructuredIntent | string;
-    catalog?: string;
+router.post('/edge-reasoning-json', async (req: Request, res: Response): Promise<void> => {
+  const { systemPrompt, message, correlationId } = req.body as {
+    systemPrompt?: string;
+    message?: string;
     correlationId?: string;
-    selectedNodes?: unknown;
-    structuralPrompt?: string;
   };
 
-  const userIntent = normalizeIntentText(intent);
-  if (!userIntent) {
-    res.status(400).json({ error: 'intent is required', ref: req.requestId });
+  if (!systemPrompt || typeof systemPrompt !== 'string' || !systemPrompt.trim()) {
+    res.status(400).json({ error: 'systemPrompt is required', ref: req.requestId });
     return;
   }
 
-  const normalizedSelectedNodes = normalizeSelectedNodes(selectedNodes);
-  if (!normalizedSelectedNodes || normalizedSelectedNodes.length === 0) {
-    res.status(400).json({ error: 'selectedNodes is required', ref: req.requestId });
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    res.status(400).json({ error: 'message is required', ref: req.requestId });
     return;
   }
 
-  let nodeCatalog: string;
-  try {
-    nodeCatalog = (typeof catalog === 'string' && catalog.length > 0)
-      ? catalog
-      : await getNodeCatalog();
-  } catch (err) {
-    res.status(503).json({ error: 'Node catalog unavailable', detail: String(err), ref: req.requestId });
-    return;
-  }
-
-  const result = await runEdgeReasoningStage(
-    normalizedSelectedNodes,
-    nodeCatalog,
-    userIntent,
+  const result = await runEdgeReasoningJsonStage({
+    systemPrompt: systemPrompt.trim(),
+    message,
     correlationId,
-    typeof structuralPrompt === 'string' ? structuralPrompt : undefined,
-  );
+  });
   res.json(result);
 });
 
