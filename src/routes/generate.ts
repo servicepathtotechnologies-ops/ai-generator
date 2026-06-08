@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { runIntentStage } from '../stages/intent';
-import { runCapabilitySelectionStage } from '../stages/capability-selection';
+import { runCapabilitySelectionJsonStage } from '../stages/capability-selection-json';
 import { runStructuralPromptStage, type StructuralPromptConstraints } from '../stages/structural-prompt';
 import { runNodeSelectionStage, type NodeSelectionConstraints } from '../stages/node-selection';
 import { runEdgeReasoningStage } from '../stages/edge-reasoning';
@@ -53,39 +53,39 @@ router.post('/intent', async (req: Request, res: Response): Promise<void> => {
 });
 
 /**
- * POST /generate/capabilities
+ * POST /generate/capability-selection-json
  *
  * Body:
- *   intent        — StructuredIntent from the intent stage (required)
- *   catalog       — pre-built node catalog string from the worker (optional;
- *                   falls back to fetching /api/nodes/catalog from the worker)
- *   correlationId — forwarded for structured log correlation (optional)
+ *   systemPrompt  - worker-built capability-selection prompt (required)
+ *   message       - worker-built user message (required)
+ *   correlationId - forwarded for structured log correlation (optional)
  *
- * Response: CapabilitySelectionOutput (same shape as worker's capability stage)
+ * Response: parsed capability steps from the LLM. The worker keeps registry
+ * reconciliation, destination coverage repair, deterministic fallback, and
+ * all capability-selection policy decisions locally.
  */
-router.post('/capabilities', async (req: Request, res: Response): Promise<void> => {
-  const { intent, catalog, correlationId } = req.body as {
-    intent?: StructuredIntent;
-    catalog?: string;
+router.post('/capability-selection-json', async (req: Request, res: Response): Promise<void> => {
+  const { systemPrompt, message, correlationId } = req.body as {
+    systemPrompt?: string;
+    message?: string;
     correlationId?: string;
   };
 
-  if (!isStructuredIntent(intent)) {
-    res.status(400).json({ error: 'intent is required', ref: req.requestId });
+  if (!systemPrompt || typeof systemPrompt !== 'string' || !systemPrompt.trim()) {
+    res.status(400).json({ error: 'systemPrompt is required', ref: req.requestId });
     return;
   }
 
-  let nodeCatalog: string;
-  try {
-    nodeCatalog = (typeof catalog === 'string' && catalog.length > 0)
-      ? catalog
-      : await getNodeCatalog();
-  } catch (err) {
-    res.status(503).json({ error: 'Node catalog unavailable', detail: String(err), ref: req.requestId });
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    res.status(400).json({ error: 'message is required', ref: req.requestId });
     return;
   }
 
-  const result = await runCapabilitySelectionStage(intent, nodeCatalog, correlationId);
+  const result = await runCapabilitySelectionJsonStage({
+    systemPrompt: systemPrompt.trim(),
+    message,
+    correlationId,
+  });
   res.json(result);
 });
 
